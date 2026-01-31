@@ -1,0 +1,44 @@
+name: DART Auto Update
+
+on:
+  schedule:
+    # 한국 시간 아침 7시 (UTC 22:00)
+    - cron: '0 22 * * *'
+    # 한국 시간 저녁 7시 (UTC 10:00)
+    - cron: '0 10 * * *'
+  # 수동 실행 버튼 추가
+  workflow_dispatch:
+
+# ★ 중요: 봇이 파일을 수정해서 저장할 수 있는 권한 부여
+permissions:
+  contents: write
+
+jobs:
+  daily-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 코드 가져오기
+        uses: actions/checkout@v3
+
+      - name: 파이썬 설정
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: 라이브러리 설치
+        run: pip install opendartreader pandas requests
+
+      - name: 업데이트 스크립트 실행
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python main.py
+
+      - name: 변경사항 저장 (Git Commit)
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git add financial_db.csv
+          # 변경사항이 없으면 에러 안 내고 그냥 넘어감
+          git commit -m "Auto-update financial data" || echo "No changes to commit"
+          git push
