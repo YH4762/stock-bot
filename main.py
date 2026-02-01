@@ -1,162 +1,152 @@
-import OpenDartReader
+import opendartreader
 import pandas as pd
 import os
 import requests
-import json
-from datetime import datetime, timedelta, timezone
 import time
+from datetime import datetime
 
-# ---------------------------------------------------------
-# [설정] GitHub Secrets에서 키를 가져옵니다
-# ---------------------------------------------------------
-API_KEY = os.environ.get('304b8ce936e5111f1c210ca242816717bf425fcb')
-SLACK_URL = os.environ.get('https://hooks.slack.com/services/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')
+# -----------------------------------------------------------
+# 1. 환경변수(Secrets) 로드
+# -----------------------------------------------------------
+print("🔄 [시스템 시작] 환경변수 및 API 키 확인 중...")
 
-DB_FILE = 'financial_db.csv'
+DART_API_KEY = os.environ.get('DART_API_KEY')
+SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
 
-dart = OpenDartReader(API_KEY)
+if DART_API_KEY is None:
+    print("❌ [오류] DART_API_KEY가 없습니다. Secrets 설정을 확인하세요.")
+    exit(1)
+else:
+    DART_API_KEY = DART_API_KEY.strip()
 
-# ---------------------------------------------------------
-# [함수] 슬랙 전송
-# ---------------------------------------------------------
-def send_slack(msg):
-    if not SLACK_URL: return
+# -----------------------------------------------------------
+# 2. DART 객체 초기화
+# -----------------------------------------------------------
+try:
+    dart = opendartreader.OpenDartReader(DART_API_KEY)
+    print("✅ DART 서버 연결 성공!")
+except Exception as e:
+    print(f"❌ [오류] DART 객체 생성 실패: {e}")
+    exit(1)
+
+# -----------------------------------------------------------
+# 3. 전체 상장사 리스트 가져오기
+# -----------------------------------------------------------
+print("📥 전체 기업 리스트를 다운로드하고 있습니다... (약 1~2분 소요)")
+try:
+    all_corps = dart.corp_codes
+    target_corps_df = all_corps[all_corps['stock_code'].notnull()]
+    total_count = len(target_corps_df)
+    print(f"✅ 분석 대상: 총 {total_count}개의 상장 기업을 찾았습니다.")
+except Exception as e:
+    print(f"❌ 기업 리스트 가져오기 실패: {e}")
+    exit(1)
+
+FILE_NAME = 'financial_db.csv'
+
+# -----------------------------------------------------------
+# 4. 유틸리티 함수 (문자열 -> 숫자 변환)
+# -----------------------------------------------------------
+def str_to_int(text):
+    """'1,234,000' 같은 문자열을 정수(1234000)로 변환"""
+    if not text:
+        return 0
     try:
-        requests.post(SLACK_URL, json={
-            "text": msg,
-            "icon_emoji": ":chart_with_upwards_trend:"
-        })
-    except: pass
+        # 괄호나 공백 제거 및 콤마 제거
+        clean_text = text.replace(",", "").replace("(", "-").replace(")", "").strip()
+        return int(clean_text)
+    except:
+        return 0
 
-# ---------------------------------------------------------
-# [함수] 데이터 추출
-# ---------------------------------------------------------
-def get_financials(code, year, r_code):
-    try:
-        df = dart.finstate_all(code, year, r_code)
-        if df is None: return None
-        
-        def f(keywords):
-            for k in keywords:
-                row = df[df['account_nm'].str.contains(k, na=False)]
-                if not row.empty:
-                    val = row.iloc[0]['thstrm_amount']
-                    if val == '-' or pd.isna(val): return 0
-                    return float(str(val).replace(',', ''))
-            return 0
-        
-        backlog = f(['수주총액', '수주잔고', '계약부채', '공사선수금', '초과청구공사'])
-        
-        return {
-            '매출액': f(['매출액', '수익(매출액)']),
-            '영업이익': f(['영업이익', '영업이익(손실)']),
-            '순이익': f(['당기순이익', '당기순이익(손실)']),
-            '영업현금흐름': f(['영업활동', '현금흐름']),
-            '수주잔고': backlog
-        }
-    except: return None
-
-# ---------------------------------------------------------
-# [메인] 실행 로직
-# ---------------------------------------------------------
-def main():
-    # 1. 기존 DB 파일 읽기 (없으면 새로 생성)
-    if os.path.exists(DB_FILE):
-        db = pd.read_csv(DB_FILE, dtype={'corp_code': str})
-        print(f"📂 기존 DB 로드 완료: {len(db)}행")
+def format_diff(value):
+    """숫자를 (+100) 또는 (-100) 형태의 문자열로 변환"""
+    if value > 0:
+        return f"(+{value:,})"
+    elif value < 0:
+        return f"({value:,})"
     else:
-        print("📂 기존 DB가 없습니다. 새로 시작합니다.")
-        db = pd.DataFrame(columns=['corp_code','corp_name','year','quarter','매출액','영업이익','순이익','영업현금흐름','수주잔고','수주잔고_증감'])
+        return "(-)"
 
-    # 2. 오늘 날짜(KST) 구하기
-    kst = timezone(timedelta(hours=9))
-    today_dt = datetime.now(kst)
-    today_str = today_dt.strftime('%Y%m%d')
-    
-    print(f"📅 오늘({today_str}) 공시를 확인합니다...")
-
-    # 3. 공시 검색
-    filings = dart.list(start=today_str, end=today_str, kind='A') # A=정기공시
-    
-    if filings is None or filings.empty:
-        print("📭 오늘 올라온 실적 공시가 없습니다.")
+# -----------------------------------------------------------
+# 5. 데이터 수집 및 알림 함수
+# -----------------------------------------------------------
+def send_slack_message(msg):
+    if not SLACK_WEBHOOK_URL:
         return
+    try:
+        requests.post(SLACK_WEBHOOK_URL, json={"text": msg})
+    except Exception as e:
+        print(f"❌ 슬랙 전송 실패: {e}")
 
-    new_rows = []
-    
-    for _, row in filings.iterrows():
-        nm = row['report_nm']
-        y = today_dt.year
-        rc, q = '', ''
+def get_financial_data(corp_code, corp_name):
+    try:
+        current_year = datetime.now().year
+        # 1차 시도: 올해 데이터
+        report = dart.finstate(corp_code, current_year)
         
-        # 보고서 종류 구분
-        if '1분기' in nm: rc, q = '11013', '1Q'
-        elif '반기' in nm: rc, q = '11012', '2Q'
-        elif '3분기' in nm: rc, q = '11014', '3Q'
-        elif '사업보고서' in nm: rc, q = '11011', '4Q'; y -= 1
-        else: continue
+        # 2차 시도: 없으면 작년 데이터
+        if report is None:
+            report = dart.finstate(corp_code, current_year - 1)
 
-        # 이미 DB에 있는 내용이면 건너뜀 (중복 방지)
-        if not db.empty:
-            is_exist = not db[(db['corp_code'] == row['corp_code']) & (db['year'] == y) & (db['quarter'] == q)].empty
-            if is_exist: continue
+        if report is None:
+            return None
 
-        print(f"🔍 발견: {row['corp_name']} {q}")
-        
-        # 데이터 가져오기
-        curr_data = get_financials(row['corp_code'], y, rc)
-        
-        if curr_data:
-            # [로직 1] 수주잔고 증감 계산 (DB에서 직전 데이터 찾기)
-            prev_backlog = 0
-            if not db.empty:
-                # 같은 기업의 데이터를 찾아서
-                corp_hist = db[db['corp_code'] == row['corp_code']]
-                if not corp_hist.empty:
-                    # 가장 마지막(최신) 행의 수주잔고를 가져옴
-                    prev_backlog = corp_hist.iloc[-1]['수주잔고']
+        # 데이터를 담을 딕셔너리 초기화
+        result = {
+            'corp_code': corp_code,
+            'corp_name': corp_name,
+            'rcept_no': '0',
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            # 당기 금액
+            'revenue': '0', 'profit': '0', 'net_income': '0',
+            # 증감액 (Diff)
+            'revenue_diff': 0, 'profit_diff': 0, 'net_income_diff': 0
+        }
+
+        # 접수번호 확인
+        if not report.empty:
+            result['rcept_no'] = report['rcept_no'].values[0]
+
+        # -------------------------------------------------------
+        # 데이터 추출 로직 (매출, 영업이익, 순이익)
+        # -------------------------------------------------------
+        targets = [
+            ('매출액', 'revenue', 'revenue_diff'),
+            ('영업이익', 'profit', 'profit_diff'),
+            ('당기순이익', 'net_income', 'net_income_diff')
+        ]
+
+        for account_nm, field_val, field_diff in targets:
+            # 연결재무제표(CFS) 우선 검색, 없으면 별도(OFS)
+            row = report.loc[(report['account_nm'] == account_nm) & (report['fs_div'] == 'CFS')]
+            if row.empty:
+                row = report.loc[(report['account_nm'] == account_nm) & (report['fs_div'] == 'OFS')]
             
-            diff = curr_data['수주잔고'] - prev_backlog
+            if not row.empty:
+                # 당기 금액 (This Term)
+                thstrm = str_to_int(row['thstrm_amount'].values[0])
+                # 전기 금액 (Former Term) - 비교 대상
+                frmtrm = str_to_int(row['frmtrm_amount'].values[0])
+                
+                # 저장용 데이터 (문자열)
+                result[field_val] = str(thstrm)
+                # 차액 계산 (당기 - 전기)
+                result[field_diff] = thstrm - frmtrm
 
-            # [로직 2] 4분기 누적 차감 (매출, 이익만)
-            if q == '4Q':
-                 q3_data = get_financials(row['corp_code'], y, '11014')
-                 if q3_data:
-                     curr_data['매출액'] -= q3_data['매출액']
-                     curr_data['영업이익'] -= q3_data['영업이익']
-                     curr_data['순이익'] -= q3_data['순이익']
-                     # 현금흐름, 수주잔고는 잔액 개념이거나 복잡해서 그대로 둠
+        return result
 
-            # 행 생성
-            new_record = {
-                'corp_code': row['corp_code'],
-                'corp_name': row['corp_name'],
-                'year': y,
-                'quarter': q,
-                **curr_data,
-                '수주잔고_증감': diff
-            }
-            new_rows.append(new_record)
-            
-            # 슬랙 알림 보내기
-            def to_b(v): return f"{v/100000000:,.1f}억"
-            msg = (f"📢 *[{row['corp_name']}] {q} 실적발표*\n"
-                   f"💰 매출: {to_b(curr_data['매출액'])}\n"
-                   f"📈 영업이익: {to_b(curr_data['영업이익'])}\n"
-                   f"🌊 수주잔고: {to_b(curr_data['수주잔고'])} (변동: {to_b(diff)})")
-            send_slack(msg)
-            
-            time.sleep(1) # API 보호
+    except Exception as e:
+        return None
 
-    # 4. 저장 (Append)
-    if new_rows:
-        new_df = pd.DataFrame(new_rows)
-        # 기존 DB 뒤에 이어붙이기
-        updated_db = pd.concat([db, new_df], ignore_index=True)
-        updated_db.to_csv(DB_FILE, index=False, encoding='utf-8-sig')
-        print(f"✅ 총 {len(new_rows)}건 업데이트 완료.")
-    else:
-        print("업데이트할 내역이 없습니다.")
-
-if __name__ == "__main__":
-    main()
+# -----------------------------------------------------------
+# 6. 메인 루프
+# -----------------------------------------------------------
+# 기존 CSV 파일 로드 (컬럼이 늘어났으므로 재설정 필요할 수 있음)
+if os.path.exists(FILE_NAME):
+    try:
+        df_old = pd.read_csv(FILE_NAME, dtype={'rcept_no': str})
+        # 구버전 파일이라 새 컬럼(diff)이 없으면 에러 날 수 있으므로 컬럼 확인
+        if 'revenue_diff' not in df_old.columns:
+            df_old = pd.DataFrame(columns=['corp_code', 'corp_name', 'rcept_no', 'date', 
+                                         'revenue', 'revenue_diff', 
+                                         'profit', 'profit_diff',
