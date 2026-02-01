@@ -149,4 +149,68 @@ if os.path.exists(FILE_NAME):
         if 'revenue_diff' not in df_old.columns:
             df_old = pd.DataFrame(columns=['corp_code', 'corp_name', 'rcept_no', 'date', 
                                          'revenue', 'revenue_diff', 
-                                         'profit', 'profit_diff',
+                                         'profit', 'profit_diff', 
+                                         'net_income', 'net_income_diff'])
+    except:
+        df_old = pd.DataFrame(columns=['corp_code', 'corp_name', 'rcept_no', 'date', 
+                                     'revenue', 'revenue_diff', 
+                                     'profit', 'profit_diff', 
+                                     'net_income', 'net_income_diff'])
+    
+    old_rcept_list = df_old['rcept_no'].tolist()
+else:
+    df_old = pd.DataFrame(columns=['corp_code', 'corp_name', 'rcept_no', 'date', 
+                                 'revenue', 'revenue_diff', 
+                                 'profit', 'profit_diff', 
+                                 'net_income', 'net_income_diff'])
+    old_rcept_list = []
+
+new_data_list = []
+updated_count = 0
+
+print("\n🚀 데이터 수집 시작 (전체 상장사 검색)...")
+
+for idx, row in target_corps_df.iterrows():
+    code = row['corp_code']
+    name = row['corp_name']
+    
+    if idx % 100 == 0:
+        print(f"⏳ 진행 중... ({idx}/{total_count})")
+
+    data = get_financial_data(code, name)
+    
+    if data:
+        if data['rcept_no'] not in old_rcept_list and data['rcept_no'] != "0":
+            print(f"✨ [NEW] {name} 공시 발견!")
+            
+            # ---------------------------------------------------
+            # 슬랙 메시지 포맷팅 (금액 + 증감)
+            # ---------------------------------------------------
+            rev_str = f"{int(data['revenue']):,}원 {format_diff(data['revenue_diff'])}"
+            prof_str = f"{int(data['profit']):,}원 {format_diff(data['profit_diff'])}"
+            net_str = f"{int(data['net_income']):,}원 {format_diff(data['net_income_diff'])}"
+
+            msg = (f"📢 *DART 알림: {name} 실적발표*\n"
+                   f"💰 매출액: {rev_str}\n"
+                   f"📈 영업이익: {prof_str}\n"
+                   f"💵 당기순이익: {net_str}")
+            
+            send_slack_message(msg)
+            
+            new_data_list.append(data)
+            updated_count += 1
+            time.sleep(0.1)
+
+# -----------------------------------------------------------
+# 7. 결과 저장
+# -----------------------------------------------------------
+print(f"\n🏁 수집 종료. 총 {updated_count}건의 새로운 공시를 찾았습니다.")
+
+if updated_count > 0:
+    df_new = pd.DataFrame(new_data_list)
+    # 기존 데이터와 병합 전 컬럼 순서 통일
+    df_final = pd.concat([df_old, df_new], ignore_index=True)
+    df_final.to_csv(FILE_NAME, index=False)
+    print("💾 financial_db.csv 업데이트 및 저장 완료.")
+else:
+    print("💤 업데이트할 내역이 없습니다.")
