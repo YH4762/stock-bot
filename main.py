@@ -1,4 +1,4 @@
-import opendartreader
+import OpenDartReader  # <--- 여기가 수정되었습니다 (대문자 중요!)
 import pandas as pd
 import os
 import requests
@@ -23,7 +23,8 @@ else:
 # 2. DART 객체 초기화
 # -----------------------------------------------------------
 try:
-    dart = opendartreader.OpenDartReader(DART_API_KEY)
+    # 라이브러리 로드 방식 수정
+    dart = OpenDartReader(DART_API_KEY)
     print("✅ DART 서버 연결 성공!")
 except Exception as e:
     print(f"❌ [오류] DART 객체 생성 실패: {e}")
@@ -45,15 +46,14 @@ except Exception as e:
 FILE_NAME = 'financial_db.csv'
 
 # -----------------------------------------------------------
-# 4. 유틸리티 함수 (문자열 -> 숫자 변환)
+# 4. 유틸리티 함수
 # -----------------------------------------------------------
 def str_to_int(text):
     """'1,234,000' 같은 문자열을 정수(1234000)로 변환"""
     if not text:
         return 0
     try:
-        # 괄호나 공백 제거 및 콤마 제거
-        clean_text = text.replace(",", "").replace("(", "-").replace(")", "").strip()
+        clean_text = str(text).replace(",", "").replace("(", "-").replace(")", "").strip()
         return int(clean_text)
     except:
         return 0
@@ -91,25 +91,20 @@ def get_financial_data(corp_code, corp_name):
         if report is None:
             return None
 
-        # 데이터를 담을 딕셔너리 초기화
         result = {
             'corp_code': corp_code,
             'corp_name': corp_name,
             'rcept_no': '0',
             'date': datetime.now().strftime('%Y-%m-%d'),
-            # 당기 금액
             'revenue': '0', 'profit': '0', 'net_income': '0',
-            # 증감액 (Diff)
             'revenue_diff': 0, 'profit_diff': 0, 'net_income_diff': 0
         }
 
-        # 접수번호 확인
         if not report.empty:
-            result['rcept_no'] = report['rcept_no'].values[0]
+            if 'rcept_no' in report.columns:
+                result['rcept_no'] = report['rcept_no'].values[0]
 
-        # -------------------------------------------------------
-        # 데이터 추출 로직 (매출, 영업이익, 순이익)
-        # -------------------------------------------------------
+        # 데이터 추출 로직
         targets = [
             ('매출액', 'revenue', 'revenue_diff'),
             ('영업이익', 'profit', 'profit_diff'),
@@ -117,20 +112,15 @@ def get_financial_data(corp_code, corp_name):
         ]
 
         for account_nm, field_val, field_diff in targets:
-            # 연결재무제표(CFS) 우선 검색, 없으면 별도(OFS)
+            # 연결(CFS) 우선, 없으면 별도(OFS)
             row = report.loc[(report['account_nm'] == account_nm) & (report['fs_div'] == 'CFS')]
             if row.empty:
                 row = report.loc[(report['account_nm'] == account_nm) & (report['fs_div'] == 'OFS')]
             
             if not row.empty:
-                # 당기 금액 (This Term)
                 thstrm = str_to_int(row['thstrm_amount'].values[0])
-                # 전기 금액 (Former Term) - 비교 대상
                 frmtrm = str_to_int(row['frmtrm_amount'].values[0])
-                
-                # 저장용 데이터 (문자열)
                 result[field_val] = str(thstrm)
-                # 차액 계산 (당기 - 전기)
                 result[field_diff] = thstrm - frmtrm
 
         return result
@@ -139,24 +129,20 @@ def get_financial_data(corp_code, corp_name):
         return None
 
 # -----------------------------------------------------------
-# 6. 메인 루프
+# 6. 메인 루프 실행
 # -----------------------------------------------------------
-# 기존 CSV 파일 로드 (컬럼이 늘어났으므로 재설정 필요할 수 있음)
+# CSV 파일 로드 (컬럼 유효성 검사 포함)
 if os.path.exists(FILE_NAME):
     try:
         df_old = pd.read_csv(FILE_NAME, dtype={'rcept_no': str})
-        # 구버전 파일이라 새 컬럼(diff)이 없으면 에러 날 수 있으므로 컬럼 확인
+        # 필수 컬럼이 없으면 새로 만듦
         if 'revenue_diff' not in df_old.columns:
-            df_old = pd.DataFrame(columns=['corp_code', 'corp_name', 'rcept_no', 'date', 
-                                         'revenue', 'revenue_diff', 
-                                         'profit', 'profit_diff', 
-                                         'net_income', 'net_income_diff'])
+            raise ValueError("Old format")
     except:
         df_old = pd.DataFrame(columns=['corp_code', 'corp_name', 'rcept_no', 'date', 
                                      'revenue', 'revenue_diff', 
                                      'profit', 'profit_diff', 
                                      'net_income', 'net_income_diff'])
-    
     old_rcept_list = df_old['rcept_no'].tolist()
 else:
     df_old = pd.DataFrame(columns=['corp_code', 'corp_name', 'rcept_no', 'date', 
@@ -170,22 +156,23 @@ updated_count = 0
 
 print("\n🚀 데이터 수집 시작 (전체 상장사 검색)...")
 
+# 전체 종목 반복
 for idx, row in target_corps_df.iterrows():
     code = row['corp_code']
     name = row['corp_name']
     
+    # 100개마다 로그 출력
     if idx % 100 == 0:
         print(f"⏳ 진행 중... ({idx}/{total_count})")
 
     data = get_financial_data(code, name)
     
     if data:
+        # 새로운 공시 발견 시
         if data['rcept_no'] not in old_rcept_list and data['rcept_no'] != "0":
             print(f"✨ [NEW] {name} 공시 발견!")
             
-            # ---------------------------------------------------
-            # 슬랙 메시지 포맷팅 (금액 + 증감)
-            # ---------------------------------------------------
+            # 숫자 포맷팅
             rev_str = f"{int(data['revenue']):,}원 {format_diff(data['revenue_diff'])}"
             prof_str = f"{int(data['profit']):,}원 {format_diff(data['profit_diff'])}"
             net_str = f"{int(data['net_income']):,}원 {format_diff(data['net_income_diff'])}"
@@ -199,18 +186,18 @@ for idx, row in target_corps_df.iterrows():
             
             new_data_list.append(data)
             updated_count += 1
+            # 속도 조절
             time.sleep(0.1)
 
 # -----------------------------------------------------------
-# 7. 결과 저장
+# 7. 저장
 # -----------------------------------------------------------
 print(f"\n🏁 수집 종료. 총 {updated_count}건의 새로운 공시를 찾았습니다.")
 
 if updated_count > 0:
     df_new = pd.DataFrame(new_data_list)
-    # 기존 데이터와 병합 전 컬럼 순서 통일
     df_final = pd.concat([df_old, df_new], ignore_index=True)
     df_final.to_csv(FILE_NAME, index=False)
-    print("💾 financial_db.csv 업데이트 및 저장 완료.")
+    print("💾 financial_db.csv 저장 완료.")
 else:
     print("💤 업데이트할 내역이 없습니다.")
