@@ -1,28 +1,23 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 
 # -----------------------------------------------------------------------------
-# 1. 페이지 설정 & 단위 변환 함수
+# 1. 페이지 설정 & 스타일
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="DART 실적 대시보드 Pro", layout="wide")
+st.set_page_config(page_title="DART Enterprise Dashboard", layout="wide", page_icon="📈")
 
-# (백만 단위로 변환된 숫자를) '조/억' 단위로 읽기 좋게 바꿔주는 함수
-def format_millions_to_korean(value):
-    if pd.isna(value) or value == 0:
-        return "-"
-    
+# 천단위 콤마 및 조/억 단위 변환 함수
+def format_currency(value):
+    if pd.isna(value) or value == 0: return "-"
     val = float(value)
-    # 입력값은 이미 백만 단위임 (1,000,000 = 1조)
-    if abs(val) >= 1000000: # 1조 이상
-        return f"{val/1000000:,.1f}조"
-    elif abs(val) >= 100:   # 1억 이상
-        return f"{val/100:,.1f}억"
-    else:
-        return f"{val:,.0f}백만"
+    if abs(val) >= 1000000: return f"{val/1000000:,.1f}조"
+    elif abs(val) >= 100:   return f"{val/100:,.1f}억"
+    else: return f"{val:,.0f}백만"
 
 # -----------------------------------------------------------------------------
-# 2. 데이터 로드 (백만 원 단위 변환)
+# 2. 데이터 로드 및 전처리
 # -----------------------------------------------------------------------------
 CSV_URL = "https://raw.githubusercontent.com/YH4762/stock-bot/main/financial_db.csv"
 
@@ -30,12 +25,11 @@ CSV_URL = "https://raw.githubusercontent.com/YH4762/stock-bot/main/financial_db.
 def load_data():
     try:
         df = pd.read_csv(CSV_URL)
-    except UnicodeDecodeError:
-        df = pd.read_csv(CSV_URL, encoding='cp949')
     except:
-        return pd.DataFrame()
+        try: df = pd.read_csv(CSV_URL, encoding='cp949')
+        except: return pd.DataFrame()
 
-    # 1. 컬럼 이름 통일
+    # 컬럼 영문 변환
     rename_map = {
         '매출액': 'revenue', '영업이익': 'profit', 
         '순이익': 'net_income', '당기순이익': 'net_income',
@@ -43,208 +37,173 @@ def load_data():
     }
     df = df.rename(columns=rename_map)
     
-    # 2. 숫자 데이터들을 전부 '백만 원' 단위로 나누기
+    # 숫자 데이터 전처리 (콤마 제거 및 백만 단위 변환)
     numeric_cols = ['revenue', 'profit', 'net_income', 'cash_flow']
     for col in numeric_cols:
         if col in df.columns:
-            # 문자열(쉼표 포함)일 경우 제거 후 변환 안전장치
             if df[col].dtype == object:
                 df[col] = df[col].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce')
-            
-            # 원 단위 -> 백만 단위 변환
-            df[col] = df[col] / 1000000
-            
+            df[col] = df[col] / 1000000 # 백만 단위로 변환
+
+    # [중요] 시계열 정렬을 위한 'Period' 컬럼 생성 (예: 2024-1Q)
+    df['period'] = df['year'].astype(str) + "-" + df['quarter']
+    
+    # [중요] 영업이익률(OPM) 계산
+    if 'revenue' in df.columns and 'profit' in df.columns:
+        df['opm'] = df.apply(lambda x: (x['profit'] / x['revenue'] * 100) if x['revenue'] > 0 else 0, axis=1)
+
     return df
 
 raw_df = load_data()
 
 # -----------------------------------------------------------------------------
-# 3. 사이드바 (고급 필터링)
+# 3. 사이드바 (하이브리드 필터)
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.header("🔍 고급 검색 옵션")
+    st.header("🔍 Analyst Control Panel")
     
     if not raw_df.empty:
-        # (1) 기본 필터
-        st.subheader("📌 기본 정보")
+        # 기업 및 기간 필터
+        st.subheader("Filter 1: Target")
         all_corps = sorted(raw_df['corp_name'].unique())
-        selected_corps = st.multiselect("기업 선택", all_corps, placeholder="기업을 선택하세요 (공란시 전체)")
+        selected_corps = st.multiselect("기업 선택 (Multi-Select)", all_corps, placeholder="전체 보기")
         
+        c1, c2 = st.columns(2)
         all_years = sorted(raw_df['year'].unique(), reverse=True)
-        selected_year = st.multiselect("연도", all_years, default=all_years[:1])
+        sel_year = c1.multiselect("Year", all_years, default=all_years[:1])
+        all_q = sorted(raw_df['quarter'].unique())
+        sel_q = c2.multiselect("Quarter", all_q, default=all_q)
         
-        all_quarters = sorted(raw_df['quarter'].unique())
-        selected_quarter = st.multiselect("분기", all_quarters, default=all_quarters)
-
         st.divider()
-
-        # (2) 재무 수치 필터 (슬라이더)
-        st.subheader("💰 재무 범위 설정 (단위: 백만)")
         
-        # 매출액 필터
-        min_rev, max_rev = int(raw_df['revenue'].min()), int(raw_df['revenue'].max())
-        rev_range = st.slider("매출액 범위", min_rev, max_rev, (min_rev, max_rev))
+        # 수치 범위 필터
+        st.subheader("Filter 2: Financial Range")
+        
+        def range_filter(label, col):
+            if col not in raw_df.columns: return -1e15, 1e15
+            _min, _max = int(raw_df[col].min()), int(raw_df[col].max())
+            slider = st.slider(f"{label} (Bar)", _min, _max, (_min, _max))
+            c1, c2 = st.columns(2)
+            i_min = c1.number_input(f"Min {label}", value=slider[0], step=1000)
+            i_max = c2.number_input(f"Max {label}", value=slider[1], step=1000)
+            return i_min, i_max
 
-        # 순이익 필터 (데이터가 있을 때만)
-        if 'net_income' in raw_df.columns:
-            min_net, max_net = int(raw_df['net_income'].min()), int(raw_df['net_income'].max())
-            net_range = st.slider("순이익 범위", min_net, max_net, (min_net, max_net))
-        else:
-            net_range = (-999999999, 999999999)
-
-        # 영업현금흐름 필터
-        if 'cash_flow' in raw_df.columns:
-            # NaN 처리
-            cf_clean = raw_df['cash_flow'].fillna(0)
-            min_cf, max_cf = int(cf_clean.min()), int(cf_clean.max())
-            cf_range = st.slider("영업현금흐름 범위", min_cf, max_cf, (min_cf, max_cf))
-        else:
-            cf_range = (-999999999, 999999999)
-
+        rev_min, rev_max = range_filter("매출(Revenue)", 'revenue')
+        prof_min, prof_max = range_filter("이익(Profit)", 'profit')
+        
     else:
-        st.error("데이터 로드 실패")
-        selected_corps, selected_year, selected_quarter = [], [], []
-        rev_range = (0, 0)
+        selected_corps, sel_year, sel_q = [], [], []
 
 # -----------------------------------------------------------------------------
-# 4. 필터링 로직 적용
+# 4. 데이터 필터링
 # -----------------------------------------------------------------------------
 if raw_df.empty:
-    st.info("데이터를 불러오는 중입니다...")
+    st.warning("데이터 로딩 중...")
     st.stop()
 
-filtered_df = raw_df.copy()
+df = raw_df.copy()
+if selected_corps: df = df[df['corp_name'].isin(selected_corps)]
+if sel_year: df = df[df['year'].isin(sel_year)]
+if sel_q: df = df[df['quarter'].isin(sel_q)]
 
-# 기본 필터
-if selected_corps:
-    filtered_df = filtered_df[filtered_df['corp_name'].isin(selected_corps)]
-if selected_year:
-    filtered_df = filtered_df[filtered_df['year'].isin(selected_year)]
-if selected_quarter:
-    filtered_df = filtered_df[filtered_df['quarter'].isin(selected_quarter)]
-
-# 수치 필터
-filtered_df = filtered_df[
-    (filtered_df['revenue'] >= rev_range[0]) & (filtered_df['revenue'] <= rev_range[1])
-]
-if 'net_income' in filtered_df.columns:
-    filtered_df = filtered_df[
-        (filtered_df['net_income'] >= net_range[0]) & (filtered_df['net_income'] <= net_range[1])
-    ]
-if 'cash_flow' in filtered_df.columns:
-    # cash_flow가 NaN이면 0으로 치고 필터링
-    filtered_df['cash_flow'] = filtered_df['cash_flow'].fillna(0)
-    filtered_df = filtered_df[
-        (filtered_df['cash_flow'] >= cf_range[0]) & (filtered_df['cash_flow'] <= cf_range[1])
-    ]
+df = df[(df['revenue'] >= rev_min) & (df['revenue'] <= rev_max)]
+df = df[(df['profit'] >= prof_min) & (df['profit'] <= prof_max)]
 
 # -----------------------------------------------------------------------------
-# 5. 메인 대시보드
+# 5. 메인 대시보드 (Tabs 구조 적용)
 # -----------------------------------------------------------------------------
-st.title("📊 DART 실적 분석 (단위: 백만 원)")
-st.markdown(f"검색 결과: **{len(filtered_df):,}**건")
+st.title("📊 Enterprise Financial Dashboard")
+st.markdown(f"**Selected Data:** {len(df):,} records | **Unit:** Million KRW (백만 원)")
 
-# (1) KPI 스코어카드 (증감액 로직 추가)
-if not filtered_df.empty:
-    # 정렬: 시간순 (연도 -> 분기)
-    filtered_df = filtered_df.sort_values(by=['year', 'quarter'])
-    
-    # 1. 가장 최근 데이터들의 합계 (Latest Period Sum)
-    # 예: 2024 1Q, 2024 2Q가 섞여있으면 -> 2Q 데이터들의 합계를 '현재 값'으로 봄
-    last_year = filtered_df['year'].max()
-    # 해당 연도에서 가장 늦은 분기 찾기
-    last_q_in_year = filtered_df[filtered_df['year'] == last_year]['quarter'].max()
-    
-    latest_df = filtered_df[
-        (filtered_df['year'] == last_year) & (filtered_df['quarter'] == last_q_in_year)
-    ]
-    
-    # 2. 가장 오래된 데이터들의 합계 (Oldest Period Sum - 비교군)
-    first_year = filtered_df['year'].min()
-    first_q_in_year = filtered_df[filtered_df['year'] == first_year]['quarter'].min()
-    
-    oldest_df = filtered_df[
-        (filtered_df['year'] == first_year) & (filtered_df['quarter'] == first_q_in_year)
-    ]
-    
-    # 만약 기간이 딱 하나만 선택되었다면 증감은 0
-    is_same_period = (last_year == first_year) and (last_q_in_year == first_q_in_year)
-    
-    # KPI 계산
-    metrics = [
-        ("매출액", 'revenue'),
-        ("영업이익", 'profit'),
-        ("순이익", 'net_income')
-    ]
-    
-    cols = st.columns(3)
-    
-    for idx, (label, col_name) in enumerate(metrics):
-        if col_name in filtered_df.columns:
-            current_val = latest_df[col_name].sum()
-            old_val = oldest_df[col_name].sum()
-            
-            diff = current_val - old_val
-            
-            # 기간이 같으면 델타 표시 안 함, 다르면 표시
-            delta_val = f"{diff:,.0f}백만" if not is_same_period else None
-            
-            cols[idx].metric(
-                label=f"총 {label} ({last_year} {last_q_in_year})",
-                value=format_millions_to_korean(current_val),
-                delta=delta_val
-            )
+# 상단 KPI (요약)
+kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+kpi1.metric("총 매출액", format_currency(df['revenue'].sum()))
+kpi2.metric("총 영업이익", format_currency(df['profit'].sum()))
+avg_opm = df['opm'].mean() if not df.empty else 0
+kpi3.metric("평균 영업이익률", f"{avg_opm:.1f}%")
+kpi4.metric("분석 대상 기업 수", f"{df['corp_name'].nunique()}개")
 
 st.divider()
 
-# (2) 차트 영역
-col_chart1, col_chart2 = st.columns(2)
+# 탭 메뉴 생성 (핵심 기능)
+tab1, tab2, tab3 = st.tabs(["📌 Overview (시장지도)", "📈 Trend (시계열)", "💎 Deep Dive (수익성)"])
 
-with col_chart1:
-    st.subheader("💰 매출액 Top 10")
-    if 'revenue' in filtered_df.columns:
-        top_rev = filtered_df.nlargest(10, 'revenue')
-        fig = px.bar(top_rev, x='corp_name', y='revenue', 
-                     text_auto=',.0f', 
-                     title="기업별 매출액", color='revenue')
-        fig.update_traces(textposition='outside')
-        st.plotly_chart(fig, use_container_width=True)
+# --- Tab 1: 시장 지도 (Treemap) ---
+with tab1:
+    st.subheader("Market Map (규모 비교)")
+    if not df.empty:
+        # 트리맵: 사각형 크기=매출, 색상=영업이익
+        fig_tree = px.treemap(
+            df, path=['year', 'corp_name'], values='revenue',
+            color='profit', color_continuous_scale='RdBu',
+            title="시장 지배력 및 수익성 지도 (크기: 매출 / 색상: 이익)"
+        )
+        st.plotly_chart(fig_tree, use_container_width=True)
+    
+    st.subheader("Top Performers Table")
+    st.dataframe(
+        df[['corp_name', 'year', 'quarter', 'revenue', 'profit', 'opm', 'net_income']]
+        .sort_values('revenue', ascending=False)
+        .style.background_gradient(subset=['profit'], cmap='Greens'), # 엑셀처럼 색깔 입히기
+        use_container_width=True
+    )
 
-with col_chart2:
-    st.subheader("📈 순이익 Top 10")
-    # 영업이익 대신 순이익으로 변경 (요청사항 반영)
-    if 'net_income' in filtered_df.columns:
-        top_net = filtered_df.nlargest(10, 'net_income')
-        fig = px.bar(top_net, x='corp_name', y='net_income', 
-                     color='net_income', text_auto=',.0f',
-                     title="기업별 순이익")
-        fig.update_traces(textposition='outside')
-        st.plotly_chart(fig, use_container_width=True)
+# --- Tab 2: 시계열 추세 (Trend) ---
+with tab2:
+    st.subheader("Revenue & Profit Trends")
+    if len(selected_corps) > 0:
+        # 기업별 비교 꺾은선 그래프
+        fig_trend = px.line(
+            df.sort_values('period'), x='period', y='revenue', color='corp_name',
+            markers=True, title="기업별 매출 추이"
+        )
+        st.plotly_chart(fig_trend, use_container_width=True)
+    else:
+        st.info("왼쪽 사이드바에서 특정 기업을 선택하면 비교 그래프가 나타납니다.")
+        # 전체 합계 추이
+        yearly_sum = df.groupby('period')[['revenue', 'profit']].sum().reset_index()
+        fig_trend_all = px.bar(yearly_sum, x='period', y='revenue', title="전체 매출 추이")
+        st.plotly_chart(fig_trend_all, use_container_width=True)
 
-# (3) 상세 표
-st.subheader("📋 상세 데이터 (단위: 백만 원)")
-
-column_config = {
-    "corp_name": "기업명",
-    "year": "연도",
-    "quarter": "분기",
-    "revenue": st.column_config.NumberColumn("매출액", format="%d"),
-    "profit": st.column_config.NumberColumn("영업이익", format="%d"),
-    "net_income": st.column_config.NumberColumn("순이익", format="%d"),
-    "cash_flow": st.column_config.NumberColumn("영업현금흐름", format="%d"),
-}
-
-# 표시할 컬럼 정의
-display_cols = ['corp_name', 'year', 'quarter', 'revenue', 'profit', 'net_income']
-if 'cash_flow' in filtered_df.columns:
-    display_cols.append('cash_flow')
-
-final_table = filtered_df[display_cols].sort_values(by=['revenue'], ascending=False)
-
-st.dataframe(
-    final_table,
-    column_config=column_config,
-    use_container_width=True,
-    hide_index=True,
-    height=600
-)
+# --- Tab 3: 수익성 분석 (Combo Chart) ---
+with tab3:
+    st.subheader("Efficiency Analysis (Dual Axis Chart)")
+    st.markdown("매출(막대)과 영업이익률(선)을 동시에 분석하여 **'덩치만 큰 기업' vs '실속 있는 기업'**을 구분합니다.")
+    
+    if not df.empty:
+        # 매출 상위 10개 기업 추출
+        top10 = df.groupby('corp_name')[['revenue', 'opm']].mean().reset_index().nlargest(10, 'revenue')
+        
+        # [고급] 이중 축 차트 (Combo Chart) 만들기
+        fig_combo = go.Figure()
+        
+        # 1. 막대 그래프 (매출)
+        fig_combo.add_trace(go.Bar(
+            x=top10['corp_name'], y=top10['revenue'],
+            name='매출액 (좌측)', marker_color='#3366CC', yaxis='y'
+        ))
+        
+        # 2. 선 그래프 (이익률)
+        fig_combo.add_trace(go.Scatter(
+            x=top10['corp_name'], y=top10['opm'],
+            name='영업이익률% (우측)', marker_color='#FF9900', mode='lines+markers', yaxis='y2'
+        ))
+        
+        # 축 설정
+        fig_combo.update_layout(
+            title="Top 10 기업 매출 vs 이익률 분석",
+            yaxis=dict(title="매출액 (백만 원)"),
+            yaxis2=dict(title="영업이익률 (%)", overlaying='y', side='right'),
+            legend=dict(x=0.01, y=0.99),
+            hovermode='x unified'
+        )
+        st.plotly_chart(fig_combo, use_container_width=True)
+        
+        # 산점도 (Scatter Plot) - X:매출, Y:이익
+        st.subheader("Risk vs Reward (Scatter Matrix)")
+        fig_scatter = px.scatter(
+            df, x='revenue', y='profit', size='revenue', color='corp_name',
+            hover_name='corp_name', log_x=True, # 로그 스케일 (큰 기업과 작은 기업 같이 보기 위함)
+            title="매출 대비 이익 분포 (Log Scale)"
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
