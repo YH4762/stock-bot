@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Yeouido Pro Dashboard", layout="wide", page_icon="📈")
 
-# [함수] 큰 숫자 포맷팅
+# [함수] 큰 숫자 포맷팅 (KPI 카드용)
 def format_big_number(value):
     if pd.isna(value) or value == 0: return "-"
     val = float(value)
@@ -37,32 +37,35 @@ def load_data():
     col_map = {k: v for k, v in rename_map.items() if k in df.columns}
     df = df.rename(columns=col_map)
     
-    # 2. 숫자 전처리 (백만 단위)
+    # 2. 숫자 전처리 (백만 단위 변환 & NaN 처리)
     target_cols = ['revenue', 'profit', 'net_income', 'cash_flow']
     for col in target_cols:
         if col in df.columns:
             if df[col].dtype == object:
                 df[col] = df[col].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce')
-            df[col] = df[col].fillna(0) / 1000000 
+            
+            df[col] = df[col].fillna(0)
+            
+            # [핵심] 백만 원 단위로 변환
+            df[col] = df[col] / 1000000 
 
-    # 3. 이익률(OPM) - 보정 전 기초 계산
-    if 'revenue' in df.columns and 'profit' in df.columns:
-        df['opm'] = df.apply(lambda x: (x['profit'] / x['revenue'] * 100) if x['revenue'] > 0 else 0, axis=1)
-
+    # 3. 시계열 컬럼 생성 (안전장치 1)
+    df['period'] = df['year'].astype(str) + "-" + df['quarter']
+    
     return df
 
 raw_df = load_data()
 
 # -----------------------------------------------------------------------------
-# 3. 사이드바 (스마트 보정 기능 추가)
+# 3. 사이드바 (필터 & 옵션)
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("🏢 Analysis Console")
     
     if not raw_df.empty:
-        # [NEW] 4분기 보정 토글 (핵심 기능)
-        st.subheader("⚙️ 데이터 보정 (Smart Fix)")
-        use_iso_4q = st.checkbox("4Q(누적)를 개별 분기로 변환", value=True, help="체크 시: 4Q(1년치)에서 1~3Q 합계를 뺍니다.")
+        # 4Q 보정 옵션
+        st.subheader("⚙️ 데이터 보정")
+        use_iso_4q = st.checkbox("4Q(누적)를 개별 분기로 변환", value=True)
         
         st.divider()
 
@@ -76,90 +79,80 @@ with st.sidebar:
         sel_q = st.multiselect("Quarter", all_q, default=all_q)
         
         st.divider()
-        
-        # 엑셀 다운로드
-        st.subheader("💾 Export")
+        st.caption("All units in Million KRW")
         
     else:
         selected_corps, sel_year, sel_q = [], [], []
         use_iso_4q = False
 
 # -----------------------------------------------------------------------------
-# 4. 스마트 데이터 가공 (4Q 역산 로직)
+# 4. 데이터 가공 (4Q 역산 & YoY)
 # -----------------------------------------------------------------------------
 if raw_df.empty:
-    st.error("데이터 로딩 실패")
+    st.error("데이터를 불러올 수 없습니다.")
     st.stop()
 
 df = raw_df.copy()
 
-# [핵심 로직] 4분기 누적 -> 개별 분기 변환
+# [로직 1] 4분기 누적 -> 개별 분기 변환
 if use_iso_4q:
-    # 1. 계산을 위해 정렬
     df = df.sort_values(['corp_name', 'year', 'quarter'])
     
-    # 2. 기업/연도별로 그룹화하여 1,2,3분기 합계 구하기
-    # (pivot table을 이용해서 1,2,3Q 데이터를 옆으로 펼침)
+    # 1~3Q 합계 계산
     pivot = df[df['quarter'].isin(['1Q', '2Q', '3Q'])].pivot_table(
         index=['corp_name', 'year'], 
         values=['revenue', 'profit', 'net_income'], 
         aggfunc='sum'
     ).reset_index()
     
-    pivot = pivot.rename(columns={
-        'revenue': 'rev_sum_123', 
-        'profit': 'prof_sum_123', 
-        'net_income': 'net_sum_123'
-    })
+    pivot = pivot.rename(columns={'revenue': 'r_sum', 'profit': 'p_sum', 'net_income': 'n_sum'})
     
-    # 3. 원본 데이터에 합계 데이터 붙이기
+    # 원본에 병합
     df = pd.merge(df, pivot, on=['corp_name', 'year'], how='left')
     
-    # 4. 4Q 데이터일 경우에만 뺄셈 수행 (누적 - 1~3Q합계)
-    # (주의: 만약 1~3Q 데이터가 없어서 0이면 4Q가 그대로 유지됨)
+    # 4Q 값 보정
     mask_4q = df['quarter'] == '4Q'
-    
-    # 4Q 값을 보정 (음수가 나오면 데이터 오류 가능성이 있으므로 0 처리 하거나 그대로 둠. 여기선 그대로 둠)
-    for col in ['revenue', 'profit', 'net_income']:
-        sum_col = f"{col[:4] if col!='net_income' else 'net'}_sum_123" # 컬럼명 매칭
-        # 컬럼 이름이 달라서 수동 매핑
-        if col == 'revenue': sum_col = 'rev_sum_123'
-        if col == 'profit': sum_col = 'prof_sum_123'
-        if col == 'net_income': sum_col = 'net_sum_123'
-        
-        # 4Q 값 = (원래 4Q값) - (1~3Q 합계)
-        # 단, 1~3Q 합계가 NaN이 아니어야 함
-        df.loc[mask_4q, col] = df.loc[mask_4q, col] - df.loc[mask_4q, sum_col].fillna(0)
+    for col, sum_col in zip(['revenue', 'profit', 'net_income'], ['r_sum', 'p_sum', 'n_sum']):
+        if col in df.columns:
+            # 4Q = 누적 - (1~3Q합)
+            df.loc[mask_4q, col] = df.loc[mask_4q, col] - df.loc[mask_4q, sum_col].fillna(0)
 
-    # 5. OPM(이익률) 재계산 (값이 바뀌었으므로)
+# [로직 2] 이익률(OPM) 재계산 (보정된 값 반영)
+if 'revenue' in df.columns and 'profit' in df.columns:
     df['opm'] = df.apply(lambda x: (x['profit'] / x['revenue'] * 100) if x['revenue'] != 0 else 0, axis=1)
 
-# [기존 로직] YoY 계산
+# [로직 3] YoY 계산
 df['prev_year'] = df['year'] - 1
 df_prev = df[['corp_name', 'year', 'quarter', 'revenue', 'profit']].copy()
 df_prev = df_prev.rename(columns={'year': 'join_year', 'revenue': 'rev_prev', 'profit': 'prof_prev'})
+
+# 병합
 df = pd.merge(df, df_prev, left_on=['corp_name', 'prev_year', 'quarter'], right_on=['corp_name', 'join_year', 'quarter'], how='left')
+
+# 증감률 계산
 df['rev_yoy'] = ((df['revenue'] - df['rev_prev']) / df['rev_prev'] * 100).fillna(0)
 df['prof_yoy'] = ((df['profit'] - df['prof_prev']) / df['prof_prev'] * 100).fillna(0)
 
-# 필터 적용
+# [안전장치] 병합 과정에서 period가 사라졌을 수 있으므로 다시 생성
+df['period'] = df['year'].astype(str) + "-" + df['quarter']
+
+# -----------------------------------------------------------------------------
+# 5. 필터 적용
+# -----------------------------------------------------------------------------
 if selected_corps: df = df[df['corp_name'].isin(selected_corps)]
 if sel_year: df = df[df['year'].isin(sel_year)]
 if sel_q: df = df[df['quarter'].isin(sel_q)]
 
-# 엑셀 다운로드 버튼 데이터 생성
+# 엑셀 다운로드용 데이터
 csv_data = df.to_csv(index=False).encode('utf-8-sig')
 
 # -----------------------------------------------------------------------------
-# 5. 메인 대시보드
+# 6. 메인 대시보드
 # -----------------------------------------------------------------------------
 st.title("📈 Yeouido Pro Dashboard")
-st.markdown(f"**Data:** {len(df):,} rows | **Unit:** 백만 원 | **4Q Correction:** {'On' if use_iso_4q else 'Off'}")
+st.markdown(f"**Data:** {len(df):,} rows | **Unit:** 백만 원 (Million KRW) | **4Q Correction:** {'On' if use_iso_4q else 'Off'}")
 
-if not raw_df.empty and use_iso_4q == False:
-    st.warning("⚠️ 현재 4Q 데이터가 '1년 누적' 상태일 수 있습니다. 정확한 분석을 위해 사이드바의 **[4Q 개별 분기 변환]**을 체크하세요.")
-
-# KPI
+# KPI 카드
 if not df.empty:
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("총 매출액", format_big_number(df['revenue'].sum()))
@@ -169,24 +162,28 @@ if not df.empty:
 
 st.divider()
 
-# 탭 메뉴
 tab1, tab2, tab3, tab4 = st.tabs(["📊 종합 현황", "⚔️ 경쟁사 비교", "📅 분기 분석", "📈 추세"])
 
-# --- Tab 1: 종합 현황 ---
+# --- Tab 1: 종합 현황 (Fancy Formatting) ---
 with tab1:
-    st.subheader("🏆 기업별 실적 (Smart Calc 적용됨)")
+    st.subheader("🏆 기업별 실적 (백만 원 단위)")
     if not df.empty:
-        cols = ['corp_name', 'year', 'quarter', 'revenue', 'rev_yoy', 'profit', 'prof_yoy', 'opm']
-        table_df = df[[c for c in cols if c in df.columns]].sort_values(['revenue'], ascending=False)
+        cols = ['corp_name', 'year', 'quarter', 'revenue', 'rev_yoy', 'profit', 'prof_yoy', 'opm', 'net_income']
+        # 컬럼 존재 여부 확인 후 선택
+        valid_cols = [c for c in cols if c in df.columns]
+        table_df = df[valid_cols].sort_values(['revenue'], ascending=False)
+        
         st.dataframe(
             table_df,
             column_config={
                 "corp_name": "기업명", "year": "연도", "quarter": "분기",
-                "revenue": st.column_config.NumberColumn("매출", format="%d"),
+                # [핵심] format="%d" -> 소수점 숨기고 정수만 표시 (콤마 자동)
+                "revenue": st.column_config.NumberColumn("매출액", format="%d"),
                 "rev_yoy": st.column_config.NumberColumn("매출성장", format="%.1f%%"),
-                "profit": st.column_config.NumberColumn("이익", format="%d"),
+                "profit": st.column_config.NumberColumn("영업이익", format="%d"),
                 "prof_yoy": st.column_config.NumberColumn("이익성장", format="%.1f%%"),
-                "opm": st.column_config.NumberColumn("이익률", format="%.1f%%")
+                "opm": st.column_config.NumberColumn("이익률", format="%.1f%%"),
+                "net_income": st.column_config.NumberColumn("순이익", format="%d")
             },
             use_container_width=True, height=600, hide_index=True
         )
@@ -195,47 +192,61 @@ with tab1:
 with tab2:
     st.subheader("⚔️ Peer Group 1:1 비교")
     c1, c2 = st.columns(2)
-    with c1: comp_a = st.selectbox("기업 A", options=sorted(raw_df['corp_name'].unique()), index=0)
-    with c2: 
-        opts = sorted(raw_df['corp_name'].unique())
-        comp_b = st.selectbox("기업 B", options=opts, index=1 if len(opts)>1 else 0)
+    # 기업 목록이 있을 때만 렌더링
+    opts = sorted(raw_df['corp_name'].unique())
+    if len(opts) > 0:
+        with c1: comp_a = st.selectbox("기업 A", options=opts, index=0)
+        with c2: comp_b = st.selectbox("기업 B", options=opts, index=1 if len(opts)>1 else 0)
 
-    df_comp = df[df['corp_name'].isin([comp_a, comp_b])].copy()
-    if not df_comp.empty:
-        fig = px.bar(df_comp.sort_values('period'), x='period', y='revenue', color='corp_name', barmode='group',
-                     title="매출액 비교 (백만)", text_auto='.2s')
-        st.plotly_chart(fig, use_container_width=True)
-        
-        fig2 = px.line(df_comp.sort_values('period'), x='period', y='opm', color='corp_name', markers=True,
-                       title="이익률(%) 비교")
-        st.plotly_chart(fig2, use_container_width=True)
+        df_comp = df[df['corp_name'].isin([comp_a, comp_b])].copy()
+        if not df_comp.empty:
+            # text_auto='.2s' 대신 '%{y:,.0f}' 사용해서 정수 콤마 포맷 적용
+            fig = px.bar(df_comp.sort_values('period'), x='period', y='revenue', color='corp_name', barmode='group',
+                         title="매출액 비교 (백만)", text_auto=False)
+            fig.update_traces(texttemplate='%{y:,.0f}', textposition='outside')
+            st.plotly_chart(fig, use_container_width=True)
+            
+            fig2 = px.line(df_comp.sort_values('period'), x='period', y='opm', color='corp_name', markers=True,
+                           title="이익률(%) 비교")
+            st.plotly_chart(fig2, use_container_width=True)
 
 # --- Tab 3: 분기 분석 ---
 with tab3:
-    st.subheader("📅 계절성 확인 (Seasonality)")
+    st.subheader("📅 계절성 확인")
     if len(selected_corps) == 1:
         target = selected_corps[0]
-        st.markdown(f"**{target}**의 분기별 패턴 (4Q 보정 여부 확인 필요)")
+        st.markdown(f"**{target}**의 분기별 패턴")
         
         target_df = df[df['corp_name'] == target].copy()
         target_df['year_str'] = target_df['year'].astype(str)
         
         fig = px.bar(target_df.sort_values(['year', 'quarter']), x='quarter', y='revenue', color='year_str', barmode='group',
                      title="분기별 실적 비교 (YoY)")
+        fig.update_traces(texttemplate='%{y:,.0f}', textposition='outside')
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("기업을 하나만 선택하면 상세 분기 분석 차트가 나옵니다.")
 
-# --- Tab 4: 추세 ---
+# --- Tab 4: 추세 (에러 수정됨) ---
 with tab4:
     st.subheader("📈 전체 추세")
     if not df.empty:
+        # [에러 해결] period 컬럼을 기준으로 groupby
+        # period 컬럼은 위에서 [안전장치]로 반드시 생성됨.
         d_sum = df.groupby('period')[['revenue', 'profit']].sum().reset_index()
+        
         fig = go.Figure()
-        fig.add_trace(go.Bar(x=d_sum['period'], y=d_sum['revenue'], name='매출'))
-        fig.add_trace(go.Scatter(x=d_sum['period'], y=d_sum['profit'], name='이익', line=dict(color='orange')))
+        fig.add_trace(go.Bar(
+            x=d_sum['period'], y=d_sum['revenue'], name='매출',
+            text=d_sum['revenue'], texttemplate='%{text:,.0f}', textposition='auto' # 콤마 포맷
+        ))
+        fig.add_trace(go.Scatter(
+            x=d_sum['period'], y=d_sum['profit'], name='이익', line=dict(color='orange'),
+            mode='lines+markers+text', text=d_sum['profit'], texttemplate='%{text:,.0f}', textposition='top center'
+        ))
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("표시할 데이터가 없습니다.")
 
-# 사이드바 다운로드 버튼 (맨 아래로 이동)
 with st.sidebar:
-    st.download_button("💾 엑셀 다운로드 (보정된 데이터)", csv_data, "dart_analysis.csv", "text/csv")
+    st.download_button("💾 엑셀 다운로드", csv_data, "dart_analysis.csv", "text/csv")
