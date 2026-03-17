@@ -9,18 +9,26 @@ import re
 # -----------------------------------------------------------
 # 1. 설정 및 초기화
 # -----------------------------------------------------------
-print("🚀 [과거 데이터 수집 모드] 시스템 가동 시작...")
+print("🚀 [데일리 모드] 시스템 가동 시작...")
 
 DART_API_KEY = os.environ.get('DART_API_KEY')
 SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
 
+# 슬랙 전송 함수 (결과 로그 확인 기능 보강)
 def send_slack(msg):
     if SLACK_WEBHOOK_URL:
         try:
-            print(f"🔔 슬랙 전송: {msg[:30]}...")
-            requests.post(SLACK_WEBHOOK_URL, json={"text": msg})
+            print(f"🔔 슬랙 전송 시도: {msg[:30]}...")
+            response = requests.post(SLACK_WEBHOOK_URL, json={"text": msg})
+            # 슬랙 서버 응답 결과 출력 (성공 시 200 ok)
+            if response.status_code == 200:
+                print(f"✅ 슬랙 전송 성공! (상태 코드: {response.status_code})")
+            else:
+                print(f"⚠️ 슬랙 전송 응답 이상: {response.status_code}, {response.text}")
         except Exception as e:
-            print(f"❌ 슬랙 전송 실패: {e}")
+            print(f"❌ 슬랙 전송 중 물리적 에러 발생: {e}")
+    else:
+        print("⚠️ SLACK_WEBHOOK_URL 설정이 없어 알림을 건너뜁니다.")
 
 if DART_API_KEY is None:
     print("❌ [오류] API 키가 없습니다.")
@@ -52,20 +60,18 @@ def get_period_from_name(report_nm):
     return None
 
 # -----------------------------------------------------------
-# 3. 공시 리스트 조회 (기간 수동 설정)
+# 3. 오늘의 공시 리스트 조회 (데일리 모드로 원복)
 # -----------------------------------------------------------
-# 누락된 데이터를 위해 기간을 직접 지정합니다.
-start_date = '20260215'
-end_date = '20260317'
-
-print(f"📅 데이터 수집 기간: {start_date} ~ {end_date}")
+# 실행 시점의 '오늘' 날짜를 자동으로 가져옵니다.
+today_str = datetime.now().strftime('%Y%m%d')
+print(f"📅 검색 일자: {today_str}")
 
 try:
-    # 정기공시(kind='A') 조회
-    report_list = dart.list(start=start_date, end=end_date, kind='A') 
+    # 정기공시(kind='A') 조회 (시작과 끝을 오늘로 설정)
+    report_list = dart.list(start=today_str, end=today_str, kind='A') 
     
     if report_list is None or report_list.empty:
-        print(f"💤 해당 기간에 실적 공시가 없습니다.")
+        print(f"💤 {today_str}일자 실적 공시가 없습니다. 작업을 종료합니다.")
         exit(0)
 
     target_reports = report_list[
@@ -99,19 +105,17 @@ for idx, row in target_reports.iterrows():
     quarter = get_period_from_name(report_nm)
     if not quarter: continue
 
-    # 보고서 이름에서 실제 사업 연도 추출
     year_match = re.search(r'\((\d{4})\.', report_nm)
     if year_match:
         year = int(year_match.group(1))
     else:
-        # 연도 추출 실패 시 현재 월 기준 보정
         current_month = datetime.now().month
         year = datetime.now().year
         if quarter == '4Q' and current_month <= 3:
             year -= 1
 
     try:
-        # 중복 체크 먼저 수행 (API 호출 절약)
+        # 중복 체크
         if os.path.exists(FILE_NAME):
             df_existing = pd.read_csv(FILE_NAME)
             check = df_existing[
@@ -149,7 +153,6 @@ for idx, row in target_reports.iterrows():
                 if val != 0: has_data = True
 
         if has_data:
-            # CSV 저장
             df_new = pd.DataFrame([save_row])
             if not os.path.exists(FILE_NAME):
                 df_new.to_csv(FILE_NAME, index=False, encoding='utf-8-sig')
@@ -159,7 +162,7 @@ for idx, row in target_reports.iterrows():
             send_slack("\n".join(msg_lines))
             print(f"   💾 {corp_name} 저장 완료")
             success_count += 1
-            time.sleep(0.5) # API 속도 제한 준수
+            time.sleep(0.5)
 
     except Exception as e:
         print(f"   ⚠️ {corp_name} 에러: {e}")
