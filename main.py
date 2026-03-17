@@ -4,6 +4,7 @@ import os
 import requests
 import time
 from datetime import datetime
+import re  # 정규표현식 모듈 추가 (보고서 이름에서 연도 추출용)
 
 # -----------------------------------------------------------
 # 1. 설정 및 초기화
@@ -112,16 +113,27 @@ for idx, row in target_reports.iterrows():
     report_nm = row['report_nm']
     rcept_no = row['rcept_no'] # 접수번호 (고유값)
     
-    # 연도와 분기 식별
+    # 분기 식별
     quarter = get_period_from_name(report_nm)
-    # 보고서 이름에 연도가 없으면 오늘 날짜 기준 연도 사용 (단순화)
-    year = datetime.now().year 
-    # 4Q(사업보고서)는 보통 다음 해에 나오므로 연도 보정이 필요할 수 있으나, 
-    # 여기서는 데이터의 '접수일 기준' 혹은 보고서 내 '기수'를 따르는 게 정확함.
-    # 편의상 수집 시점의 연도를 사용하되, 필요 시 보정 로직 추가 가능.
-
+    
     if not quarter:
         continue # 분기를 알 수 없는 보고서(정정신고 등)는 스킵
+
+    # -------------------------------------------------------
+    # [수정된 부분] 정확한 사업 연도 추출 로직
+    # 보고서 이름에서 연도 추출 (예: "사업보고서 (2025.12)" -> 2025)
+    year_match = re.search(r'\((20\d{2})\.', report_nm)
+    
+    if year_match:
+        year = int(year_match.group(1))
+    else:
+        # 괄호 표기가 없는 경우의 차선책 (현재 연도 기준)
+        current_month = datetime.now().month
+        year = datetime.now().year
+        # 1~3월에 발표되는 4Q(사업보고서)는 직전 연도 실적으로 간주
+        if quarter == '4Q' and current_month <= 3:
+            year -= 1
+    # -------------------------------------------------------
 
     try:
         # 재무제표 가져오기 (연결 -> 별도 순)
