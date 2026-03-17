@@ -2,56 +2,54 @@ name: Daily IR Update
 
 on:
   schedule:
-    # 한국 시간(KST) 오전 9시 정기 실행 (UTC 00:00)
     - cron: '0 0 * * *'
-  workflow_dispatch: # 수동 실행 버튼 활성화
+  workflow_dispatch:
+
+# 권한 설정 추가 (Write 권한 명시)
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 저장소 체크아웃 (버전 v3 -> v4로 업데이트)
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 모든 히스토리를 가져와야 rebase가 가능합니다.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }} # 기본 토큰 사용 명시
 
-      # 2. 파이썬 설정 (버전 v4 -> v5로 업데이트)
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # 3. 필요한 라이브러리 설치
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install OpenDartReader pandas requests
 
-      # 4. 메인 스크립트 실행
       - name: Run main script
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python main.py
 
-      # 5. 변경사항 커밋 및 푸시 (충돌 방지 로직 포함)
       - name: Commit and Push changes
         run: |
-          git config --global user.name "GitHub Actions Bot"
-          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 변경된 파일이 있는지 확인 후 커밋
           git add .
+          
+          # 변경사항이 있는지 확인
           if git diff --quiet && git diff --staged --quiet; then
             echo "No changes to commit"
           else
             git commit -m "Auto-update financial data [$(date +'%Y-%m-%d')]"
             
-            # 푸시 전 최신 상태를 가져와서 합침 (rejected 에러 방지 핵심)
+            # 128 에러 방지용 안전 푸시 로직
             git pull --rebase origin main
-            
-            # 최종 푸시
             git push origin main
           fi
